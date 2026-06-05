@@ -6,6 +6,8 @@ import threading
 import logging
 from datetime import datetime
 import socket  # Potrzebne do pobrania nazwy komputera
+import subprocess
+import winreg
 
 # GUI Imports
 import tkinter as tk
@@ -122,7 +124,7 @@ os.environ['SSL_CERT_FILE'] = certifi.where()
 pc_statuses = {}
 CURRENTLY_BUSY = False
 CURRENT_STREAMER = None
-clicker_running = True  # ZMIENIONO: Klikacz uruchomiony automatycznie od startu
+clicker_running = True  # Klikacz uruchomiony automatycznie od startu
 
 # --- LOGGERY ---
 logger_discord = logging.getLogger('DiscordBot')
@@ -148,6 +150,85 @@ def log_d(message):
 
 def log_c(message):
     logger_clicker.info(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+# --- FUNKCJE AUTOMATYCZNEGO URUCHAMIANIA PRZEGLĄDARKI ---
+def znajdz_przegladarke():
+    """Przeszukuje rejestr Windows w poszukiwaniu znanych przeglądarek."""
+    szukane_przegladarki = [
+        "Google Chrome", "Brave", "Opera", "Opera GX", 
+        "Firefox", "Chromium", "Waterfox"
+    ]
+    
+    sciezka_rejestru = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+    
+    for przegladarka in szukane_przegladarki:
+        exe_name = {
+            "Google Chrome": "chrome.exe",
+            "Brave": "brave.exe",
+            "Opera": "opera.exe",
+            "Opera GX": "opera.exe",
+            "Firefox": "firefox.exe",
+            "Chromium": "chromium.exe",
+            "Waterfox": "waterfox.exe"
+        }.get(przegladarka)
+
+        try:
+            for root_reg in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    klucz = winreg.OpenKey(root_reg, f"{sciezka_rejestru}\\{exe_name}")
+                    sciezka, _ = winreg.QueryValueEx(klucz, "")
+                    winreg.CloseKey(klucz)
+                    if os.path.exists(sciezka):
+                        return sciezka, przegladarka
+                except FileNotFoundError:
+                    continue
+        except Exception:
+            pass
+
+    return None, None
+
+def maksymalizuj_okno_przegladarki(nazwa_przegladarki):
+    """Szuka okna aktywnej przeglądarki i wymusza jego maksymalizację."""
+    log_c("Próbuję zmaksymalizować okno przeglądarki...")
+    
+    frazy_tytulu = [nazwa_przegladarki, "GitHub Pages", "start.html"]
+    if "Chrome" in nazwa_przegladarki:
+        frazy_tytulu.append("Google Chrome")
+
+    for _ in range(10): 
+        time.sleep(0.5)
+        for okno in gw.getAllWindows():
+            if any(fraza.lower() in okno.title.lower() for fraza in frazy_tytulu if okno.title):
+                try:
+                    okno.maximize()
+                    log_c(f"Zmaksymalizowano okno: {okno.title}")
+                    return True
+                except Exception as e:
+                    log_c(f"Nie udało się zmaksymalizować: {e}")
+                    return False
+    log_c("Nie znaleziono aktywnego okna przeglądarki do zmaksymalizowania.")
+    return False
+
+def uruchom_autostart():
+    """Wątek uruchamiający przeglądarkę ze wskazaną stroną startową."""
+    URL = "https://itsmatisio.github.io/start.html"
+
+    # Automatyczne szukanie i odpalanie przeglądarki
+    browser_path, nazwa_przegladarki = znajdz_przegladarke()
+    
+    if browser_path:
+        log_c(f"Autostart: Uruchamiam {nazwa_przegladarki}")
+        try:
+            subprocess.Popen([browser_path, URL])
+            maksymalizuj_okno_przegladarki(nazwa_przegladarki)
+        except Exception as e:
+            log_c(f"Problem z uruchomieniem przeglądarki: {e}")
+    else:
+        log_c("Nie wykryto przeglądarki z listy, odpalam domyślną...")
+        import webbrowser
+        webbrowser.open(URL)
+
+    log_c("Autostart: Sekwencja uruchamiania przeglądarki zakończona.")
 
 # --- BOT DISCORD ---
 intents = discord.Intents.default()
@@ -246,7 +327,6 @@ def twitch_clicker_loop():
 
         if keyboard.is_pressed('q'):
             clicker_running = False
-            # Bezpieczna zmiana tekstu przycisku w głównym wątku okna
             root.after(0, lambda: btn_click.config(text="Uruchom Klikacza", bg="lightgreen"))
             log_c("Wyłączono klikacza (klawisz Q)")
             continue
@@ -265,7 +345,7 @@ def twitch_clicker_loop():
                             for dy in range(0, 10, 2):
                                 if x+dx < width and y+dy < height:
                                     pr, pg, pb = img.getpixel((x+dx, y+dy))
-                                    if all(abs(p-t) <= TOLERANCE for p,t in zip((pr,pg,pb), TARGET_COLOR)):
+                                    if remove_ptp := all(abs(p-t) <= TOLERANCE for p,t in zip((pr,pg,pb), TARGET_COLOR)):
                                         check_count += 1
                         
                         if check_count > MIN_PIXELS:
@@ -311,7 +391,6 @@ top.pack(pady=10)
 btn_disc = tk.Button(top, text="Połącz Discord", command=start_bot_thread, bg="lightblue")
 btn_disc.pack(side=tk.LEFT, padx=10)
 
-# Domyślnie przycisk jest ustawiony na "Zatrzymaj", bo skrypt startuje z clicker_running = True
 btn_click = tk.Button(top, text="Zatrzymaj Klikacza", command=toggle_clicker, bg="coral")
 btn_click.pack(side=tk.LEFT, padx=10)
 
@@ -341,6 +420,9 @@ root.title(f"PC: {PC_NAME}")
 
 # 3. URUCHOMIENIE PĘTLI KLIKACZA W TLE
 threading.Thread(target=twitch_clicker_loop, daemon=True).start()
+
+# 4. ZINTEGROWANY AUTOSTART (Sama Przeglądarka)
+threading.Thread(target=uruchom_autostart, daemon=True).start()
 
 # Automatyczne uruchomienie bota, jeśli token istnieje w .env
 if TOKEN:
